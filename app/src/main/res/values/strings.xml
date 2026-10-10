@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">RideSmart</string>
+    <string name="accessibility_description">RideSmart reads ride prices from Uber, Ola, Rapido and Namma Yatri to compare fares and help you book the cheapest ride.</string>
+</resources>
