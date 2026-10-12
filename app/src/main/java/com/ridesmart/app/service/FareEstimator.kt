@@ -20,10 +20,8 @@ object FareEstimator {
             baseFare = 20, perKm = 6.0, perMin = 0.8, minFare = 35, etaBase = 3))
         quotes.add(makeQuote(ProviderName.UBER, RideType.MINI, "Uber Go", distance, duration, surge,
             baseFare = 50, perKm = 15.0, perMin = 1.5, minFare = 80, etaBase = 3))
-        quotes.add(makeQuote(ProviderName.UBER, RideType.SEDAN, "Go Sedan", distance, duration, surge,
+        quotes.add(makeQuote(ProviderName.UBER, RideType.PREMIUM, "Go Sedan", distance, duration, surge,
             baseFare = 80, perKm = 18.0, perMin = 2.0, minFare = 110, etaBase = 5))
-        quotes.add(makeQuote(ProviderName.UBER, RideType.SUV, "Uber XL", distance, duration, surge,
-            baseFare = 100, perKm = 22.0, perMin = 2.2, minFare = 150, etaBase = 6))
 
         // Ola fares (Chennai)
         quotes.add(makeQuote(ProviderName.OLA, RideType.AUTO, "Auto", distance, duration, surge,
@@ -32,10 +30,8 @@ object FareEstimator {
             baseFare = 20, perKm = 6.0, perMin = 0.8, minFare = 35, etaBase = 2))
         quotes.add(makeQuote(ProviderName.OLA, RideType.MINI, "Mini", distance, duration, surge,
             baseFare = 55, perKm = 14.0, perMin = 1.5, minFare = 80, etaBase = 4))
-        quotes.add(makeQuote(ProviderName.OLA, RideType.SEDAN, "Prime Sedan", distance, duration, surge,
+        quotes.add(makeQuote(ProviderName.OLA, RideType.PREMIUM, "Prime Sedan", distance, duration, surge,
             baseFare = 75, perKm = 17.0, perMin = 1.9, minFare = 105, etaBase = 5))
-        quotes.add(makeQuote(ProviderName.OLA, RideType.SUV, "Prime SUV", distance, duration, surge,
-            baseFare = 90, perKm = 20.0, perMin = 2.1, minFare = 140, etaBase = 6))
 
         // Rapido fares (Chennai)
         quotes.add(makeQuote(ProviderName.RAPIDO, RideType.BIKE, "Bike", distance, duration, surge,

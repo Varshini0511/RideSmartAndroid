@@ -3,6 +3,8 @@ package com.ridesmart.app.ui.screens
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
@@ -47,6 +49,7 @@ fun ResultsScreen(
 ) {
     val selectedForRace = remember { mutableStateListOf<RideQuote>() }
     var showRaceDialog by remember { mutableStateOf(false) }
+    var showDiagnostics by remember { mutableStateOf(false) }
     val racingState by raceBooker.racingState.collectAsState()
     val isScraping = scrapeStatus == RideAccessibilityService.ScrapeStatus.SCRAPING
 
@@ -84,6 +87,7 @@ fun ResultsScreen(
                     }
                 },
                 actions = {
+                    TextButton(onClick = { showDiagnostics = true }) { Text("Debug") }
                     if (!isScraping && accessibilityOn) {
                         TextButton(onClick = onRetryAll) { Text("Refresh") }
                     }
@@ -273,6 +277,31 @@ fun ResultsScreen(
         )
     }
 
+    if (showDiagnostics) {
+        AlertDialog(
+            onDismissRequest = { showDiagnostics = false },
+            title = { Text("Debug — what RideSmart read (${diagnostics.size})", fontSize = 15.sp) },
+            text = {
+                Column(
+                    modifier = Modifier
+                        .heightIn(max = 460.dp)
+                        .verticalScroll(rememberScrollState())
+                ) {
+                    if (diagnostics.isEmpty()) {
+                        Text("Nothing captured yet. Tap an app to open its ride list.", fontSize = 12.sp)
+                    } else {
+                        diagnostics.forEach {
+                            Text("• $it", fontSize = 11.sp, modifier = Modifier.padding(vertical = 2.dp))
+                        }
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = { showDiagnostics = false }) { Text("Close") }
+            }
+        )
+    }
+
     racingState?.let { state ->
         RaceBookingOverlay(
             state = state,
@@ -288,14 +317,15 @@ fun ResultsScreen(
 @Composable
 private fun ProviderStatusRow(statuses: List<ProviderStatus>, onTap: (ProviderName) -> Unit) {
     Column(modifier = Modifier.padding(vertical = 8.dp)) {
-        Text("Live price status", fontSize = 12.sp, fontWeight = FontWeight.SemiBold, color = TextSecondary)
-        Spacer(modifier = Modifier.height(6.dp))
+        Text("Tap each app to get its live price", fontSize = 13.sp, fontWeight = FontWeight.Bold, color = TextPrimary)
+        Text("It opens the app, reads the fare, and comes back on its own", fontSize = 11.sp, color = TextTertiary)
+        Spacer(modifier = Modifier.height(8.dp))
         statuses.forEach { status ->
             val (icon, label, tappable) = when (status.state) {
-                ProviderLoadState.OK -> Triple("✅", "live price captured", false)
+                ProviderLoadState.OK -> Triple("✅", "live price captured · tap to refresh", true)
                 ProviderLoadState.READING -> Triple("🔄", "reading now…", false)
                 ProviderLoadState.PENDING -> Triple("⏳", "waiting…", false)
-                ProviderLoadState.MISSING -> Triple("⚠️", "no live price — tap to open", true)
+                ProviderLoadState.MISSING -> Triple("👉", "tap to get live price", true)
             }
             Row(
                 modifier = Modifier

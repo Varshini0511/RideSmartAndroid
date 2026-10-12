@@ -19,11 +19,19 @@ enum class RideType(val label: String, val icon: String) {
     AUTO("Auto", "🛺"),
     BIKE("Bike", "🏍"),
     MINI("Mini / Cab", "🚗"),
-    SEDAN("Sedan", "🚘"),
-    SUV("SUV", "🚙");
+    PREMIUM("Sedan / SUV", "🚙");
 }
 
-/** Maps a vehicle name exactly as shown in a ride app to a comparison category. */
+/**
+ * Maps a vehicle name exactly as shown in a ride app to one of four comparison categories.
+ * Calibrated to the real names across Uber, Ola, Rapido and Namma Yatri:
+ *   Auto       : Auto, Auto Priority, Auto Lite
+ *   Bike       : Bike, Bike Pink, Scooty
+ *   Mini / Cab : Mini, Mini Non AC, Prime Plus, Cab Economy, Cab Priority, AC Cab,
+ *                Uber Go AC, Go Priority
+ *   Sedan / SUV: Prime Sedan, Prime SUV, Cab Premium, Cab XL, Sedan, SUV, SUV Plus,
+ *                Go Sedan, Uber XL
+ */
 object VehicleClassifier {
     private val NOISE_WORDS = setOf(
         "pay", "payment", "cash", "offer", "offers", "coupon", "promo", "wallet", "upi",
@@ -41,15 +49,15 @@ object VehicleClassifier {
         fun has(vararg w: String) = w.any { it in words }
         // substr() catches names glued together like "UberXL" or "UberGo".
         fun substr(vararg w: String) = w.any { it in joined.replace(" ", "") }
-        // Order matters: "Prime SUV" is SUV, "Go Sedan" is Sedan, "Auto Lite" is Auto.
+        // Order matters: Auto/Bike win first; then Sedan/SUV (so "Go Sedan", "Cab XL",
+        // "Prime SUV" land there) before everything cab-ish falls into Mini / Cab.
         return when {
-            has("suv", "innova", "ertiga") || substr("suv", "xl") ||
-                "6 seat" in joined || "7 seat" in joined -> RideType.SUV
             has("auto", "rickshaw", "tuk") -> RideType.AUTO
             has("bike", "moto", "motorbike", "scooty", "scooter") -> RideType.BIKE
-            has("sedan", "prime", "premier", "premium", "comfort", "plush") -> RideType.SEDAN
-            has("mini", "micro", "economy", "go", "saver", "lite", "cab",
-                "hatchback", "priority") || substr("ubergo") -> RideType.MINI
+            has("sedan", "suv", "premium", "premier", "comfort", "plush", "innova", "ertiga") ||
+                substr("suv", "xl") || "6 seat" in joined || "7 seat" in joined -> RideType.PREMIUM
+            has("mini", "micro", "economy", "cab", "go", "saver", "lite", "priority",
+                "plus", "hatchback") || substr("ubergo") -> RideType.MINI
             else -> null
         }
     }

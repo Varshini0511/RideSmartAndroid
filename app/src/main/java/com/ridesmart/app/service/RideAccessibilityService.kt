@@ -22,9 +22,17 @@ import kotlinx.coroutines.flow.update
 
 class RideAccessibilityService : AccessibilityService() {
 
-    private val scope = CoroutineScope(Dispatchers.Main + SupervisorJob())
+    // Swallow any stray coroutine error so the accessibility service (and the app) can't be
+    // crashed by an unexpected failure while reading another app's screen.
+    private val scope = CoroutineScope(
+        Dispatchers.Main + SupervisorJob() +
+            kotlinx.coroutines.CoroutineExceptionHandler { _, e ->
+                Log.e(TAG, "coroutine error: ${e.message}")
+            }
+    )
     private var scanJob: Job? = null
     private var autoScrapeJob: Job? = null
+    private var singleJob: Job? = null
 
     enum class ScrapeStatus { IDLE, SCRAPING, DONE }
 
@@ -32,6 +40,8 @@ class RideAccessibilityService : AccessibilityService() {
         private const val TAG = "RideA11y"
         private val RIDE_PACKAGES = ProviderName.entries.map { it.packageName }.toSet()
         private val PRICE_REGEX = Regex("""(?:₹|Rs\.?|INR)\s*([0-9][0-9,]{1,5})""")
+        // Like PRICE_REGEX but also eats an optional leading "Fare " so the name before it is clean.
+        private val FARE_REGEX = Regex("""(?i)(?:fare\s*)?(?:₹|rs\.?|inr)\s*([0-9][0-9,]{1,5})""")
         private val ETA_REGEX = Regex("""(\d{1,2})\s*min""", RegexOption.IGNORE_CASE)
         private val PROMO_REGEX = Regex("""\b(off|save|saved|cashback|discount)\b""", RegexOption.IGNORE_CASE)
 
@@ -101,9 +111,19 @@ class RideAccessibilityService : AccessibilityService() {
             instance?.startAutoScrape(pickup, drop)
         }
 
+        /**
+         * Option-1 flow: open ONE app on the route, read its price, and snap back to RideSmart
+         * automatically. Triggered by the user tapping that app, so the launch is never blocked
+         * by the OS. Reliable and smooth — no hands-off background cycling.
+         */
+        fun captureOne(pickup: LocationData, drop: LocationData, provider: ProviderName) {
+            instance?.startSingle(pickup, drop, provider)
+        }
+
         fun cancelAutoScrape() {
             instance?.let {
                 it.autoScrapeJob?.cancel()
+                it.singleJob?.cancel()
                 _currentProvider.value = null
                 _scrapeStatus.value = ScrapeStatus.DONE
             }
@@ -207,6 +227,30 @@ class RideAccessibilityService : AccessibilityService() {
         fun foregroundPackage(): String? =
             instance?.rootInActiveWindow?.packageName?.toString()
 
+        /** Scrolls the ride list down so off-screen options (Mini/Cab/Sedan) come into view. */
+        fun scrollRideList(packageName: String): Boolean {
+            val svc = instance ?: return false
+            val root = svc.rootInActiveWindow ?: return false
+            if (root.packageName?.toString() != packageName) return false
+            // Prefer a real scrollable node's scroll action.
+            val scrollable = svc.findNode(root) { it.isScrollable && it.isVisibleToUser }
+            if (scrollable != null &&
+                scrollable.performAction(AccessibilityNodeInfo.ACTION_SCROLL_FORWARD)
+            ) return true
+            // Fallback: swipe up in the lower half of the screen.
+            val screen = Rect().also { root.getBoundsInScreen(it) }
+            if (screen.isEmpty) return false
+            val x = screen.exactCenterX()
+            val path = Path().apply {
+                moveTo(x, screen.top + screen.height() * 0.72f)
+                lineTo(x, screen.top + screen.height() * 0.40f)
+            }
+            val gesture = GestureDescription.Builder()
+                .addStroke(GestureDescription.StrokeDescription(path, 0, 250))
+                .build()
+            return svc.dispatchGesture(gesture, null, null)
+        }
+
         /** True if the current window belongs to [packageName] and shows a ₹ fare. */
         fun showsPrices(packageName: String): Boolean {
             val svc = instance ?: return false
@@ -281,16 +325,18 @@ class RideAccessibilityService : AccessibilityService() {
             val root = svc.rootInActiveWindow ?: return false
             if (root.packageName?.toString() != packageName) return false
 
-            val fieldBottom = svc.findNode(root) { it.isEditable && it.isVisibleToUser }
+            val editField = svc.findNode(root) { it.isEditable && it.isVisibleToUser }
+            val fieldBottom = editField
                 ?.let { Rect().also { r -> it.getBoundsInScreen(r) }.bottom } ?: 0
-            val q = normalize(query)
 
+            // The first suggestion row below the input. Do NOT exclude rows that match what we
+            // typed — the matching suggestion IS the one to tap. Only exclude the input field
+            // itself (editable) and price rows.
             val candidates = mutableListOf<AccessibilityNodeInfo>()
             svc.collectIf(root, candidates) { node ->
-                if (!node.isVisibleToUser) return@collectIf false
+                if (!node.isVisibleToUser || node.isEditable) return@collectIf false
                 val text = nodeText(node) ?: return@collectIf false
                 if (text.length < 3 || PRICE_REGEX.containsMatchIn(text)) return@collectIf false
-                if (normalize(text) == q) return@collectIf false
                 val r = Rect().also { node.getBoundsInScreen(it) }
                 r.top >= fieldBottom && !r.isEmpty
             }
@@ -358,7 +404,9 @@ class RideAccessibilityService : AccessibilityService() {
         _isRunning.value = true
         // Heartbeat: every 1.2s, read whatever ride app is on screen. Event-driven capture
         // misses prices that are already static when you look; this catches them reliably.
-        heartbeatJob = scope.launch {
+        // Run screen-reading OFF the main thread, or fetching another window's content every
+        // 1.2s stalls RideSmart's own UI (janky scroll, and iQOO bouncing you out of the app).
+        heartbeatJob = scope.launch(Dispatchers.Default) {
             while (isActive) {
                 delay(1200)
                 runCatching { scanActiveWindow() }
@@ -391,11 +439,37 @@ class RideAccessibilityService : AccessibilityService() {
             return
         }
 
-        // Content-changed events fire many times per second; scan at most every 250ms.
+        // Content-changed events fire many times per second; scan at most every 250ms, and on
+        // a background thread so a heavy window read never stalls RideSmart's UI.
         if (scanJob?.isActive == true) return
-        scanJob = scope.launch {
+        scanJob = scope.launch(Dispatchers.Default) {
             delay(250)
-            scanActiveWindow()
+            runCatching { scanActiveWindow() }  // never let a scan error crash the app
+        }
+    }
+
+    private fun startSingle(pickup: LocationData, drop: LocationData, provider: ProviderName) {
+        singleJob?.cancel()
+        autoScrapeJob?.cancel()
+        singleJob = scope.launch { runSingle(provider, pickup, drop) }
+    }
+
+    private suspend fun runSingle(provider: ProviderName, pickup: LocationData, drop: LocationData) {
+        _scrapeStatus.value = ScrapeStatus.SCRAPING
+        _currentProvider.value = provider
+        ScrapeKeepAliveService.start(this)
+        try {
+            withTimeoutOrNull(MAX_PER_APP_MS) { scrapeOne(provider, pickup, drop) }
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            Log.e(TAG, "capture ${provider.displayName} failed: ${e.message}")
+        } finally {
+            _currentAction.value = null
+            _currentProvider.value = null
+            _scrapeStatus.value = ScrapeStatus.DONE
+            runCatching { DeepLinks.returnToRideSmart(this) } // snap back to RideSmart
+            ScrapeKeepAliveService.stop(this)
         }
     }
 
@@ -452,10 +526,18 @@ class RideAccessibilityService : AccessibilityService() {
         }
 
         if (captured) {
+            // Read the visible rides, then scroll the list down a few times so Mini/Cab/Sedan
+            // options below the fold (which aren't in the screen data until scrolled) also
+            // get read. Prices merge by name, so scrolling only adds, never loses.
             val settleEnd = SystemClock.elapsedRealtime() + SETTLE_MS
             while (SystemClock.elapsedRealtime() < settleEnd) {
                 capturePricesNow(pkg)
-                delay(500)
+                delay(400)
+            }
+            repeat(4) {
+                scrollRideList(pkg)
+                delay(700)
+                capturePricesNow(pkg)
             }
         }
     }
@@ -521,13 +603,13 @@ class RideAccessibilityService : AccessibilityService() {
         if (pkg !in RIDE_PACKAGES) return
 
         val texts = mutableListOf<String>()
-        collectTexts(root, texts, limit = 400)
+        runCatching { collectTexts(root, texts, limit = 400) }
         _screenText.update { it + (pkg to texts.joinToString("\n")) }
 
         // Passive capture: read prices from ANY ride app whose price screen is visible,
         // whether RideSmart auto-opened it or the user did. Auto-drive just brings the
         // screen to the front; the reading happens here either way.
-        val found = extractVehicleRows(root)
+        val found = runCatching { extractVehicleRows(root) }.getOrDefault(emptyList())
         if (found.isEmpty()) return
 
         // Union with earlier scans of this session so a half-rendered frame can't drop rows.
@@ -569,24 +651,36 @@ class RideAccessibilityService : AccessibilityService() {
         for (label in labels) {
             val text = label.text
             if (PROMO_REGEX.containsMatchIn(text)) continue
-            val fares = PRICE_REGEX.findAll(text).mapNotNull { parseFare(it) }.filter { it in 25..9000 }.toList()
 
-            // Combined line where name + fare live in ONE node — Uber: "Auto,Fare ₹283…",
-            // Rapido: "Auto ride. Estimated fare ₹314 in 2 mins". The vehicle name is whatever
-            // comes before the fare/₹, so cut there, then take the part that classifies.
-            if (fares.isNotEmpty()) {
-                val head = text.split(Regex("""(?i)fare|estimated|₹|\brs\b|\binr\b"""))[0]
-                val nameSeg = head.split(Regex("[,·•|.\n]"))
+            // Scan for every "<name> … [Fare] ₹<price>" pair in this node. Handles a single
+            // ride per node, Uber/Rapido's "<name>,Fare ₹…" lines, AND a whole list packed into
+            // one node — for each price, the vehicle name is the last classifiable chunk before
+            // it (since the previous price).
+            val priceHits = FARE_REGEX.findAll(text).toList()
+            var anyNamed = false
+            var cursor = 0
+            for (ph in priceHits) {
+                val fare = ph.groupValues[1].replace(",", "").toIntOrNull()
+                val before = text.substring(cursor, ph.range.first)
+                cursor = ph.range.last + 1
+                if (fare == null || fare !in 25..9000) continue
+                val name = before.split(Regex("[,·•|.\n]"))
                     .map { cleanName(it) }
-                    .firstOrNull { it.isNotBlank() && it.length <= 24 && VehicleClassifier.classify(it) != null }
-                if (nameSeg != null) {
-                    record(nameSeg, VehicleClassifier.classify(nameSeg)!!, fares.min(), etaOf(text))
-                    continue
+                    .lastOrNull { it.isNotBlank() && it.length <= 24 && VehicleClassifier.classify(it) != null }
+                if (name != null) {
+                    record(name, VehicleClassifier.classify(name)!!, fare, etaOf(text))
+                    anyNamed = true
                 }
             }
+            if (anyNamed) continue
 
-            // Otherwise it's a separate name label or price label → pair by screen position.
-            fares.forEach { prices.add(it to label.bounds) }
+            // No name sat with the price in this node (Ola-style separate labels) → pair by
+            // screen position. Needs real coordinates, so skip bounds-less (not-visible) nodes.
+            if (label.bounds.isEmpty) continue
+            priceHits.forEach { ph ->
+                ph.groupValues[1].replace(",", "").toIntOrNull()?.takeIf { it in 25..9000 }
+                    ?.let { prices.add(it to label.bounds) }
+            }
             val cleaned = cleanName(text)
             if (cleaned.isNotBlank() && cleaned.length <= 24) {
                 VehicleClassifier.classify(cleaned)?.let { names.add(NameHit(cleaned, it, label.bounds)) }
@@ -631,21 +725,23 @@ class RideAccessibilityService : AccessibilityService() {
     private fun collectLabels(
         node: AccessibilityNodeInfo,
         out: MutableList<Label>,
-        budget: IntArray = intArrayOf(2500)
+        budget: IntArray = intArrayOf(6000)
     ) {
-        if (budget[0] <= 0 || out.size >= 250) return
+        if (budget[0] <= 0 || out.size >= 800) return
         budget[0]--
-        if (node.isVisibleToUser) {
-            nodeText(node)?.let { t ->
-                // Allow long lines too — Uber packs a whole ride (name + fare + eta) into one.
-                if (t.length in 1..160) {
-                    val r = Rect().also { node.getBoundsInScreen(it) }
-                    if (!r.isEmpty) out.add(Label(t, r))
-                }
+        nodeText(node)?.let { t ->
+            // Collect ALL text nodes, even ones flagged not-visible — Uber/Rapido keep their
+            // "Auto,Fare ₹283" ride info in a container's accessibility description that reports
+            // not-visible. Bounds may be empty for those; the combined-line parser ignores
+            // bounds, and position-pairing (Ola) filters to real bounds itself. Big limit so a
+            // ride list that sits below a long map/header tree still gets reached.
+            if (t.length in 1..400) {
+                val r = Rect().also { node.getBoundsInScreen(it) }
+                out.add(Label(t, r))
             }
         }
         for (i in 0 until node.childCount) {
-            if (budget[0] <= 0 || out.size >= 250) return
+            if (budget[0] <= 0 || out.size >= 800) return
             node.getChild(i)?.let { collectLabels(it, out, budget) }
         }
     }

@@ -418,8 +418,7 @@ fun HomeScreen(
                 RideChip(RideType.AUTO, "🛺", "Auto"),
                 RideChip(RideType.BIKE, "🏍", "Bike"),
                 RideChip(RideType.MINI, "🚗", "Mini/Cab"),
-                RideChip(RideType.SEDAN, "🚘", "Sedan"),
-                RideChip(RideType.SUV, "🚙", "SUV"),
+                RideChip(RideType.PREMIUM, "🚙", "Sedan/SUV"),
             ).forEach { chip ->
                 val selected = selectedRideTypes.contains(chip.type)
                 FilterChip(

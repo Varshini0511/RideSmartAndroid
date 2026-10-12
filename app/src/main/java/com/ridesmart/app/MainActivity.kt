@@ -102,7 +102,8 @@ fun RideSmartApp() {
     // Show every ride app in the status list — never hide one over a flaky install check.
     val installedProviders = ProviderName.entries
 
-    // Only real, captured prices are ever shown — no estimates anywhere.
+    // Show only the ride categories the user selected (Auto, Mini/Cab, …). A single tap-to-read
+    // captures the app's whole list, so the selected category is populated across all apps.
     val liveQuotes = remember(rawScraped, pickup, drop, selectedRideTypes) {
         val p = pickup
         val d = drop
@@ -139,10 +140,11 @@ fun RideSmartApp() {
         }
     }
 
-    val providerStatuses = remember(rawScraped, scrapeStatus, currentProvider, selectedRideTypes) {
+    val providerStatuses = remember(rawScraped, scrapeStatus, currentProvider) {
         installedProviders.map { provider ->
-            val hasLive = rawScraped[provider.packageName]?.prices
-                ?.any { it.rideType in selectedRideTypes } == true
+            // ✅ once the app has captured ANY price — not filtered by the selected ride type,
+            // so an app that worked never still shows "tap to get".
+            val hasLive = rawScraped[provider.packageName]?.prices?.isNotEmpty() == true
             val state = when {
                 hasLive -> ProviderLoadState.OK
                 scrapeStatus == RideAccessibilityService.ScrapeStatus.SCRAPING &&
@@ -164,12 +166,11 @@ fun RideSmartApp() {
                     currentScreen = Screen.RESULTS
                     SessionStore.save(context, p, d, rideTypes)
 
+                    // Option 1: no hands-off background cycling. Clear old prices; the user
+                    // taps each app to fetch its live price (reliable, never OS-blocked).
                     RideAccessibilityService.cancelAutoScrape()
                     RideAccessibilityService.clearAllPrices()
                     RideAccessibilityService.clearPersistedPrices(context)
-                    if (isAccessibilityRunning) {
-                        RideAccessibilityService.requestAutoScrape(p, d)
-                    }
                 }
             )
         }
@@ -193,18 +194,19 @@ fun RideSmartApp() {
                     RideAccessibilityService.clearPersistedPrices(context)
                 },
                 onRetryAll = {
+                    // "Refresh" clears captured prices so the user can re-fetch each app.
                     RideAccessibilityService.cancelAutoScrape()
-                    RideAccessibilityService.requestAutoScrape(p, d)
+                    RideAccessibilityService.clearAllPrices()
+                    RideAccessibilityService.clearPersistedPrices(context)
                 },
                 onOpenProvider = { provider ->
-                    // One-tap retry for a stubborn app — reuses the same pickup/drop.
-                    RideAccessibilityService.startScraping(
-                        RideAccessibilityService.ScrapeAction(provider.packageName)
-                    )
-                    DeepLinks.openWithRoute(context, provider, p, d)
+                    // Tap an app → open it on the route, read its price, snap back automatically.
+                    RideAccessibilityService.captureOne(p, d, provider)
                 },
                 onBookSingle = { quote ->
-                    raceBooker.startRaceBooking(listOf(quote), p, d)
+                    // Just open the chosen app on the route — the user selects and confirms the
+                    // ride themselves (reliable). No fragile auto-tap-the-vehicle-and-book.
+                    DeepLinks.openWithRoute(context, quote.provider, p, d)
                 }
             )
         }
